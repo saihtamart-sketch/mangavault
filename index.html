@@ -1509,7 +1509,7 @@ function renderDetailModalAL(m){
       <button class="btn-secondary" onclick="addToLibAL(${m.id},${m.idMal||0},'${safeTitle}','${safeCover}',${m.chapters||0},'completed')">${inLib?'✓ En biblioteca':'+ Agregar a biblioteca'}</button>
       <button class="btn-secondary" onclick="addToLibAL(${m.id},${m.idMal||0},'${safeTitle}','${safeCover}',${m.chapters||0},'pending')">📌 Pendiente</button>
       <button class="btn-secondary" onclick="openReader('${safeTitle}')">📖 Subir caps</button>
-      <button class="btn-primary" onclick="closeDetailModalBtn();openChapterList(title||titleRomaji,${m.id})" style="background:var(--blue)">📚 Ver capítulos</button>
+      <button class="btn-primary" onclick="closeDetailModalBtn();openChapterList('${safeTitle}',${m.id})" style="background:var(--blue)">📚 Ver capítulos</button>
     </div>`;
   // Translate description async
   setTimeout(translateModalDesc, 300);
