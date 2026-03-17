@@ -765,32 +765,59 @@ const MDX='https://api.mangadex.org';
 const mdxCache={};
 
 async function mdxFetch(url){
-  if(mdxCache[url]) return mdxCache[url];
+  if(mdxCache[url]!==undefined) return mdxCache[url];
   try{
-    const res=await fetch(url,{headers:{'Accept':'application/json'}});
-    if(!res.ok) return null;
+    const res=await fetch(url,{
+      headers:{'Accept':'application/json'}
+    });
+    if(!res.ok){mdxCache[url]=null;return null;}
     const json=await res.json();
     mdxCache[url]=json;
     return json;
   }catch(e){return null;}
 }
 
-// Search manga on MangaDex by title
-async function mdxSearchManga(title){
-  const url=`${MDX}/manga?title=${encodeURIComponent(title)}&limit=5&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&includes[]=cover_art`;
+// Search manga by title - tries multiple strategies
+async function mdxFindManga(title){
+  // Strategy 1: search by title directly
+  const clean=title.replace(/[^\w\s]/g,' ').trim();
+  const url=`${MDX}/manga?title=${encodeURIComponent(clean)}&limit=10&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&order[relevance]=desc`;
   const data=await mdxFetch(url);
-  return data?.data||[];
+  const results=data?.data||[];
+  if(!results.length) return null;
+
+  // Score each result by title similarity
+  const norm=s=>s.toLowerCase().replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();
+  const target=norm(title);
+  let best=null, bestScore=0;
+  for(const m of results){
+    const titles=Object.values(m.attributes?.title||{});
+    const altTitles=(m.attributes?.altTitles||[]).flatMap(t=>Object.values(t));
+    const allTitles=[...titles,...altTitles];
+    for(const t of allTitles){
+      const n=norm(t);
+      if(n===target){return m;} // exact match
+      // Partial match score
+      const shorter=target.length<n.length?target:n;
+      const longer=target.length<n.length?n:target;
+      if(longer.includes(shorter)&&shorter.length>3){
+        const score=shorter.length/longer.length;
+        if(score>bestScore){bestScore=score;best=m;}
+      }
+    }
+  }
+  return best||results[0];
 }
 
-// Get chapters for a manga
-async function mdxGetChapters(mangaId,lang){
-  lang=lang||'es';
-  const url=`${MDX}/chapter?manga=${mangaId}&translatedLanguage[]=${lang}&order[chapter]=asc&limit=100&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica`;
+// Get chapters - tries spanish first, falls back to english
+async function mdxGetChapters(mangaId, lang, offset){
+  offset=offset||0;
+  const url=`${MDX}/chapter?manga=${mangaId}&translatedLanguage[]=${lang}&order[chapter]=asc&limit=96&offset=${offset}&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&includes[]=scanlation_group`;
   const data=await mdxFetch(url);
-  return data?.data||[];
+  return {chapters:data?.data||[], total:data?.total||0};
 }
 
-// Get chapter pages
+// Get chapter pages from MangaDex@Home
 async function mdxGetPages(chapterId){
   const url=`${MDX}/at-home/server/${chapterId}`;
   const data=await mdxFetch(url);
@@ -801,20 +828,7 @@ async function mdxGetPages(chapterId){
   return pages.map(p=>`${base}/data/${hash}/${p}`);
 }
 
-// Find best match manga on MangaDex
-async function mdxFindManga(title){
-  const results=await mdxSearchManga(title);
-  if(!results.length) return null;
-  // Try to find exact or close match
-  const titleLower=title.toLowerCase().replace(/[^a-z0-9]/g,' ').trim();
-  for(const m of results){
-    const mdTitle=(m.attributes?.title?.en||Object.values(m.attributes?.title||{})[0]||'').toLowerCase().replace(/[^a-z0-9]/g,' ').trim();
-    if(mdTitle===titleLower||mdTitle.includes(titleLower)||titleLower.includes(mdTitle)) return m;
-  }
-  return results[0]; // fallback to first result
-}
-
-// Open chapter reader from MangaDex
+// Open chapter in reader
 async function openMdxChapter(chapterId,chapterNum,mangaTitle){
   showToast(`Cargando capítulo ${chapterNum}...`);
   const pages=await mdxGetPages(chapterId);
@@ -822,14 +836,12 @@ async function openMdxChapter(chapterId,chapterNum,mangaTitle){
     showToast('No se pudo cargar el capítulo');
     return;
   }
-  // Open in reader
-  document.getElementById('detailModal').classList.remove('active');
   document.getElementById('chapterModal').classList.remove('active');
-  openReaderWithPages(pages, `${mangaTitle} — Cap. ${chapterNum}`);
+  openReaderWithPages(pages,`${mangaTitle} — Cap. ${chapterNum}`);
 }
 
-// Open reader with pre-loaded URLs (no file upload needed)
-function openReaderWithPages(urls, title){
+// Open reader with URL array directly
+function openReaderWithPages(urls,title){
   readerFrom=document.querySelector('.page.active')?.id?.replace('page-','')||'home';
   document.getElementById('readerTitle').textContent=title||'Lector';
   readerImages=urls;
@@ -837,32 +849,42 @@ function openReaderWithPages(urls, title){
   document.getElementById('modeCascade').classList.add('active');
   document.getElementById('modePage').classList.remove('active');
   readerMode='cascade';
-  // Render directly with URLs (not base64)
-  const body=document.getElementById('readerBody');
-  body.innerHTML=`<div style="text-align:center;padding:2rem;color:var(--text3)">Cargando páginas...</div>`;
   goToPage('reader');
-  // Load images
-  body.innerHTML=`<div class="cascade-reader">${urls.map((src,i)=>`<img class="cascade-img" src="${src}" alt="Página ${i+1}" loading="lazy" onerror="this.style.opacity='0.3'">`).join('')}</div>`;
+  const body=document.getElementById('readerBody');
+  body.innerHTML=`<div class="cascade-reader">${urls.map((src,i)=>`<img class="cascade-img" src="${src}" alt="Página ${i+1}" loading="lazy" onerror="this.style.opacity='0.2'">`).join('')}</div>`;
 }
 
-// Open chapter list modal
+// Open chapter list — full page
 async function openChapterList(title, alId){
   const modal=document.getElementById('chapterModal');
   const inner=document.getElementById('chapterModalInner');
   modal.classList.add('active');
   inner.innerHTML=`<div style="padding:2rem;text-align:center;color:var(--text3)">
-    <div style="font-family:'Bebas Neue',sans-serif;font-size:1.5rem;letter-spacing:2px">Buscando capítulos...</div>
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:1.5rem;letter-spacing:2px;margin-bottom:0.5rem">Buscando en MangaDex...</div>
+    <div style="font-size:0.8rem">Esto puede tardar unos segundos</div>
   </div>`;
 
   // Find manga on MangaDex
   const manga=await mdxFindManga(title);
   if(!manga){
     inner.innerHTML=`<div style="padding:2rem;text-align:center">
-      <div style="font-size:2rem;margin-bottom:1rem">😔</div>
-      <div style="color:var(--text2);margin-bottom:1rem">No se encontró este manga en MangaDex</div>
-      <a href="https://mangaplus.shueisha.co.jp/search_result?keyword=${encodeURIComponent(title)}" target="_blank" style="background:var(--accent);color:white;padding:10px 20px;border-radius:4px;text-decoration:none;font-size:0.85rem">
-        Ver en MangaPlus (oficial) →
-      </a>
+      <div style="font-size:2rem;margin-bottom:1.5rem">😔</div>
+      <div style="color:var(--text2);margin-bottom:0.5rem;font-size:1rem">No se encontró "<strong>${title}</strong>" en MangaDex</div>
+      <div style="color:var(--text3);font-size:0.8rem;margin-bottom:1.5rem">Podés buscarlo en estas plataformas legales:</div>
+      <div style="display:flex;gap:1rem;flex-wrap:wrap;justify-content:center">
+        <a href="https://mangaplus.shueisha.co.jp/search_result?keyword=${encodeURIComponent(title)}" target="_blank"
+           style="background:#e63946;color:white;padding:10px 20px;border-radius:4px;text-decoration:none;font-size:0.85rem">
+          MangaPlus (Shueisha)
+        </a>
+        <a href="https://www.viz.com/search?search=${encodeURIComponent(title)}" target="_blank"
+           style="background:var(--bg3);color:var(--text);border:1px solid var(--border);padding:10px 20px;border-radius:4px;text-decoration:none;font-size:0.85rem">
+          VIZ Media
+        </a>
+        <a href="https://mangadex.org/search?q=${encodeURIComponent(title)}" target="_blank"
+           style="background:var(--bg3);color:var(--text);border:1px solid var(--border);padding:10px 20px;border-radius:4px;text-decoration:none;font-size:0.85rem">
+          Buscar en MangaDex
+        </a>
+      </div>
     </div>`;
     return;
   }
@@ -879,14 +901,32 @@ async function openChapterList(title, alId){
   }
 
   if(!chapters.length){
-    inner.innerHTML=`<div style="padding:2rem;text-align:center">
-      <div style="font-size:2rem;margin-bottom:1rem">😔</div>
-      <div style="color:var(--text2);margin-bottom:1rem">No hay capítulos disponibles en MangaDex</div>
-      <a href="https://mangaplus.shueisha.co.jp/search_result?keyword=${encodeURIComponent(title)}" target="_blank" style="background:var(--accent);color:white;padding:10px 20px;border-radius:4px;text-decoration:none;font-size:0.85rem">
-        Ver en MangaPlus (oficial) →
-      </a>
-    </div>`;
-    return;
+    // Try english as last resort
+    const enFallback=await mdxGetChapters(mangaId,'en');
+    if(enFallback.chapters.length){
+      chapters=enFallback.chapters;
+      lang='en';
+    } else {
+      inner.innerHTML=`<div style="padding:2rem;text-align:center">
+        <div style="font-size:2rem;margin-bottom:1rem">😔</div>
+        <div style="color:var(--text2);margin-bottom:1.5rem">No hay capítulos disponibles en MangaDex para este manga</div>
+        <div style="display:flex;gap:1rem;flex-wrap:wrap;justify-content:center">
+          <a href="https://mangaplus.shueisha.co.jp/search_result?keyword=${encodeURIComponent(title)}" target="_blank" 
+             style="background:#e63946;color:white;padding:10px 20px;border-radius:4px;text-decoration:none;font-size:0.85rem">
+            MangaPlus (Shueisha)
+          </a>
+          <a href="https://www.viz.com/search?search=${encodeURIComponent(title)}" target="_blank"
+             style="background:var(--bg3);color:var(--text);border:1px solid var(--border);padding:10px 20px;border-radius:4px;text-decoration:none;font-size:0.85rem">
+            VIZ Media
+          </a>
+          <a href="https://mangadex.org/search?q=${encodeURIComponent(title)}" target="_blank"
+             style="background:var(--bg3);color:var(--text);border:1px solid var(--border);padding:10px 20px;border-radius:4px;text-decoration:none;font-size:0.85rem">
+            Buscar en MangaDex
+          </a>
+        </div>
+      </div>`;
+      return;
+    }
   }
 
   // Also check if english chapters exist alongside spanish
@@ -899,46 +939,73 @@ async function openChapterList(title, alId){
   const safeTitle=title.replace(/'/g,"\'");
   const langLabel=lang==='es'?'🇪🇸 Español':'🇬🇧 Inglés';
 
+  function renderChapterRows(chs, safeTit){
+    return chs.map(ch=>{
+      const num=ch.attributes?.chapter||'?';
+      const chapTitle=ch.attributes?.title||'';
+      const group=(ch.relationships||[]).find(r=>r.type==='scanlation_group')?.attributes?.name||'';
+      const pages=ch.attributes?.pages||0;
+      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 1.5rem;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.15s"
+        onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background=''"
+        onclick="openMdxChapter('${ch.id}','${num}','${safeTit}')">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:0.9rem;color:var(--text);font-weight:700">Cap. ${num}${chapTitle?' — <span style=font-weight:400;color:var(--text2)>'+chapTitle+'</span>':''}</div>
+          ${group?`<div style="font-size:0.7rem;color:var(--text3);margin-top:3px">📖 ${group}</div>`:''}
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;flex-shrink:0">
+          ${pages?`<span style="font-size:0.7rem;color:var(--text3)">${pages}p</span>`:''}
+          <div style="background:var(--accent);color:white;padding:5px 14px;border-radius:3px;font-size:0.75rem;letter-spacing:1px">▶ LEER</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
   inner.innerHTML=`
-    <div style="padding:1.5rem 2rem;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+    <div style="padding:1.25rem 1.5rem;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
       <div>
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:1.5rem;letter-spacing:2px">${mdxTitle}</div>
-        <div style="font-size:0.75rem;color:var(--text3);margin-top:4px">${chapters.length} capítulos · ${langLabel}</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;letter-spacing:2px;line-height:1">${mdxTitle}</div>
+        <div style="font-size:0.75rem;color:var(--text3);margin-top:4px">${chapters.length} capítulos disponibles · ${langLabel}</div>
       </div>
-      ${enChapters.length&&lang==='es'?`<button class="btn-secondary" style="font-size:0.7rem;padding:6px 12px" onclick="loadEnglishChapters('${mangaId}','${safeTitle}')">Ver en inglés</button>`:''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${lang==='en'?`<button class="btn-secondary" style="font-size:0.7rem;padding:5px 12px" onclick="switchChapterLang('${mangaId}','${safeTitle}','es')">🇪🇸 Español</button>`:''}
+        ${lang==='es'?`<button class="btn-secondary" style="font-size:0.7rem;padding:5px 12px" onclick="switchChapterLang('${mangaId}','${safeTitle}','en')">🇬🇧 Inglés</button>`:''}
+        <a href="https://mangadex.org/search?q=${encodeURIComponent(title)}" target="_blank" 
+           style="background:var(--bg3);color:var(--text2);border:1px solid var(--border);padding:5px 12px;border-radius:3px;text-decoration:none;font-size:0.7rem">
+          Ver en MangaDex ↗
+        </a>
+      </div>
     </div>
-    <div id="chapterList" style="max-height:50vh;overflow-y:auto">
-      ${chapters.map(ch=>{
-        const num=ch.attributes?.chapter||'?';
-        const chapTitle=ch.attributes?.title||'';
-        const group=(ch.relationships||[]).find(r=>r.type==='scanlation_group')?.attributes?.name||'';
-        return `<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 2rem;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.15s" 
-          onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background=''"
-          onclick="openMdxChapter('${ch.id}','${num}','${safeTitle}')">
-          <div>
-            <div style="font-size:0.9rem;color:var(--text);font-weight:700">Capítulo ${num}${chapTitle?' — '+chapTitle:''}</div>
-            ${group?`<div style="font-size:0.7rem;color:var(--text3);margin-top:2px">${group}</div>`:''}
-          </div>
-          <div style="color:var(--accent);font-size:0.8rem">▶ Leer</div>
-        </div>`;
-      }).join('')}
+    <div id="chapterList" style="overflow-y:auto;max-height:60vh">
+      ${renderChapterRows(chapters, safeTitle)}
     </div>`;
 }
 
-async function loadEnglishChapters(mangaId, title){
+async function switchChapterLang(mangaId, title, lang){
   const list=document.getElementById('chapterList');
   if(!list) return;
-  list.innerHTML=`<div style="padding:2rem;text-align:center;color:var(--text3)">Cargando...</div>`;
-  const chapters=await mdxGetChapters(mangaId,'en');
-  if(!chapters.length){list.innerHTML=`<div style="padding:2rem;text-align:center;color:var(--text3)">Sin capítulos en inglés</div>`;return;}
+  list.innerHTML=`<div style="padding:2rem;text-align:center;color:var(--text3)">Cargando capítulos...</div>`;
+  const {chapters}=await mdxGetChapters(mangaId,lang);
+  if(!chapters.length){
+    list.innerHTML=`<div style="padding:2rem;text-align:center;color:var(--text3)">Sin capítulos disponibles en este idioma</div>`;
+    return;
+  }
+  const safeTitle=title.replace(/'/g,"\'");
   list.innerHTML=chapters.map(ch=>{
     const num=ch.attributes?.chapter||'?';
     const chapTitle=ch.attributes?.title||'';
-    return `<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 2rem;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.15s"
+    const group=(ch.relationships||[]).find(r=>r.type==='scanlation_group')?.attributes?.name||'';
+    const pages=ch.attributes?.pages||0;
+    return `<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 1.5rem;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.15s"
       onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background=''"
-      onclick="openMdxChapter('${ch.id}','${num}','${title}')">
-      <div style="font-size:0.9rem;color:var(--text);font-weight:700">Capítulo ${num}${chapTitle?' — '+chapTitle:''}</div>
-      <div style="color:var(--accent);font-size:0.8rem">▶ Leer</div>
+      onclick="openMdxChapter('${ch.id}','${num}','${safeTitle}')">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:0.9rem;color:var(--text);font-weight:700">Cap. ${num}${chapTitle?' — '+chapTitle:''}</div>
+        ${group?`<div style="font-size:0.7rem;color:var(--text3);margin-top:3px">📖 ${group}</div>`:''}
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;flex-shrink:0">
+        ${pages?`<span style="font-size:0.7rem;color:var(--text3)">${pages}p</span>`:''}
+        <div style="background:var(--accent);color:white;padding:5px 14px;border-radius:3px;font-size:0.75rem;letter-spacing:1px">▶ LEER</div>
+      </div>
     </div>`;
   }).join('');
 }
